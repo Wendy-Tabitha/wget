@@ -1,0 +1,6 @@
+# Ignore script files
+*.sh
+
+*.jpg
+*.png
+*.jpeg

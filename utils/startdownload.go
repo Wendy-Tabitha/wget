@@ -8,9 +8,17 @@ import (
 	"time"
 )
 
-func StartDownload(url, fileName string, background bool) {
+func StartDownload(url string, limitBps interface{}, outputFilename string, savePath string) {
 	startTime := time.Now()
-	fmt.Printf("--%s--  %s\n", startTime.Format("2006-01-02 15:04:05"), url)
+	fmt.Printf("start at %s\n", startTime.Format("2006-01-02 15:04:05"))
+	fmt.Printf("sending request, awaiting response... ")
+
+	// Get full save path
+	fullPath, err := HandlePath(savePath, outputFilename, url)
+	if err != nil {
+		fmt.Printf("Error setting up save path: %v\n", err)
+		return
+	}
 
 	// Send request
 	resp, err := http.Get(url)
@@ -22,51 +30,52 @@ func StartDownload(url, fileName string, background bool) {
 
 	// Check response status
 	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("HTTP request sent, awaiting response... %d %s\n", resp.StatusCode, http.StatusText(resp.StatusCode))
+		fmt.Printf("status %d %s\n", resp.StatusCode, http.StatusText(resp.StatusCode))
 		return
 	}
+	fmt.Printf("status %d %s\n", resp.StatusCode, http.StatusText(resp.StatusCode))
 
 	// Get content length
-	contentLength := resp.ContentLength
+	contentLength := float64(resp.ContentLength)
 	if contentLength < 0 {
-		contentLength = 0 // Handle unknown content length
+		fmt.Printf("content size: -- [~-.--MB]\n")
+	} else {
+		fmt.Printf("content size: %.0f [~%.2fMB]\n", contentLength, float64(contentLength)/1_048_576)
 	}
-	fmt.Printf("Length: %d (%s) [%s]\n", contentLength, formatSize(contentLength), resp.Header.Get("Content-Type"))
 
-	// Create file
-	out, err := os.Create(fileName)
+	fmt.Printf("saving file to: %s\n", fullPath)
+
+	// Create output file
+	out, err := os.Create(fullPath)
 	if err != nil {
 		fmt.Printf("Error creating file: %v\n", err)
 		return
 	}
 	defer out.Close()
 
-	// Download file
+	if limitBps == nil {
+		limitBps = 1 * 1024 * 1024 // 1 MBps default
+	}
+
+	limiter := &RateLimiter{
+		reader:   resp.Body,
+		limitBps: limitBps.(float64),
+		lastTime: time.Now(),
+	}
+
+	// Download with progress tracking
 	progress := &ProgressWriter{total: contentLength, current: 0, startTime: startTime}
-	_, err = io.Copy(out, io.TeeReader(resp.Body, progress))
+	_, err = io.Copy(out, io.TeeReader(limiter, progress))
 	if err != nil {
 		fmt.Printf("Error downloading file: %v\n", err)
 		return
 	}
 
-	fmt.Printf("\n%s 100%%[========================>]  %s   in %s\n", fileName, formatSize(contentLength), time.Since(startTime))
-	fmt.Printf("'%s' saved [%d/%d]\n", fileName, contentLength, contentLength)
+	finishTime := time.Now()
+	fmt.Printf("\nDownloaded [%s]\nfinished at %s\n", url, finishTime.Format("2006-01-02 15:04:05"))
 }
 
-func (pw *ProgressWriter) Write(p []byte) (n int, err error) {
-	n = len(p)
-	pw.current += int64(n)
-
-	// Calculate progress
-	percentage := float64(pw.current) / float64(pw.total) * 100
-	elapsed := time.Since(pw.startTime)
-	remaining := time.Duration(float64(elapsed) / (float64(pw.current) / float64(n)) * float64(pw.total-pw.current))
-
-	fmt.Printf("\r %s %d / %d [%.2f%%] %s remaining", formatSize(pw.current), pw.current, pw.total, percentage, remaining)
-	return n, nil
-}
-
-func formatSize(size int64) string {
+func FormatSize(size int64) string {
 	if size >= 1_048_576 { // 1 MiB
 		return fmt.Sprintf("%.2fMiB", float64(size)/1_048_576)
 	} else if size >= 1_024 { // 1 KiB
